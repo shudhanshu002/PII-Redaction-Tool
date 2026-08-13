@@ -3,10 +3,10 @@
 A Python-based tool for removing Personally Identifiable Information (PII) from financial and legal `.docx` files, such as Red Herring Prospectuses.
 
 ## Live Demo
-[]
+[https://pii-redaction-tool-s2npxcehj32erbpar9such.streamlit.app/]
 
 ## GitHub URL
-[]
+[https://github.com/shudhanshu002/PII-Redaction-Tool]
 
 ## Approach & Methodology
 The tool uses multiple techniques to detect and replace sensitive information with synthetic data while keeping the document structure intact:
