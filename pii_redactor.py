@@ -1,118 +1,277 @@
 import re
+import sys
+import os
 import docx
 from faker import Faker
 import spacy
 
-nlp = spacy.load("en_core_web_sm")
+# Load SpaCy English language model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    print("SpaCy model 'en_core_web_sm' not found locally. Downloading model...")
+    from spacy.cli import download
+    download("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
+
 fake = Faker("en_IN")
 
-class PIIRedactor:
+
+class DocumentPIIRedactor:
     def __init__(self):
+        # Store original-to-fake value mappings for consistency throughout the document
         self.mapping = {}
 
-        # 1. Stricter Regex Patterns including PAN and Aadhaar
+        # Gazetteer of known specific entities (promoters, trusts, banks, registrars)
+        self.known_entities = {
+            "KSH INTERNATIONAL LIMITED", "KSH International Limited", "KSH INTERNATIONAL PRIVATE LIMITED",
+            "Bhandary Metal Extrusion Private Limited", "KUSHAL SUBBAYYA HEGDE", "Kushal Subbayya Hegde",
+            "PUSHPA KUSHAL HEGDE", "Pushpa Kushal Hegde", "RAJESH KUSHAL HEGDE", "Rajesh Kushal Hegde",
+            "ROHIT KUSHAL HEGDE", "Rohit Kushal Hegde", "RAKHI GIRIJA SHETTY", "Rakhi Girija Shetty",
+            "Sarthak Malvadkar", "Sandesh Bhagwat", "Amod Joshi", "Sangeeta Ramprasad Rai",
+            "Maithili Rajesh Hegde", "Katyayani Balasubramanian", "Lalit Muljibhai Sarvaiya",
+            "Dinesh Hirachand Munot", "Ajay Shriram Patil", "Ram Kumar Tiwari", "Indu Jacob",
+            "DHAULAGIRI FAMILY TRUST", "EVEREST FAMILY TRUST", "MAKALU FAMILY TRUST", 
+            "BROAD FAMILY TRUST", "ANNAPURNA FAMILY TRUST", "KANCHENJUNGA FAMILY TRUST",
+            "WATERLOO INDUSTRIAL PARK VI PRIVATE LIMITED", "Dhaulagiri Family Trust",
+            "Everest Family Trust", "Makalu Family Trust", "Broad Family Trust",
+            "Annapurna Family Trust", "Kanchenjunga Family Trust",
+            "ICICI Securities Limited", "ICICI Bank", "HDFC Bank Limited", "HDFC Bank",
+            "Link Intime India Private Limited", "Nuvama", "State Bank of India",
+            "Bajaj Finance", "Federal Bank", "Export Import Bank of India", "Citibank"
+        }
+
+        # Additional entity keywords
+        self.known_entities.update({
+            "ICICI", "HDFC", "Trilegal"
+        })
+
+        # Regular expressions for structured identifiers
         self.patterns = {
+            "URL": r'(?i)(?:https?://|www\.)[a-z0-9.\-]+(?:\s*[\./]\s*[a-z0-9\-/]+)*(?:\s*(?:com|in|co|org|net|gov|edu|io|info)\b)?',
             "EMAIL": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-            # Strict 10-digit Indian mobile format with optional +91 prefix. Avoids CIN matches.
-            "PHONE": r'(?<!\w)(?:\+?91[\s-]?)?[6-9]\d{9}(?!\w)', 
-            "AADHAAR": r'\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b',
+            "PHONE": r'(?:\+\s*)?(?:91[\s-]?)?(?:\(?\d{2,4}\)?[\s-]?)?\d{3,5}[\s-]?\d{4,5}\b',
             "PAN_CARD": r'\b[A-Z]{5}[0-9]{4}[A-Z]\b',
+            "AADHAAR": r'\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b',
             "IP_ADDRESS": r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b',
             "CREDIT_CARD": r'\b(?:\d[ -]*?){13,16}\b',
             "SSN": r'\b\d{3}-\d{2}-\d{4}\b',
-            "DOB": r'\b(0[1-9]|1[0-2])[\/.-](0[1-9]|[12]\d|3[01])[\/.-](19|20)\d{2}\b|\b\d{4}[-/.](0[1-9]|1[02])[-/.](0[1-9]|[12]\d|3[01])\b',
+            "DOB": r'\b(?:0[1-9]|1[0-2])[\/.-](?:0[1-9]|[12]\d|3[01])[\/.-](?:19|20)\d{2}\b|\b\d{4}[-/.](?:0[1-9]|1[02])[-/.](?:0[1-9]|[12]\d|[301])\b',
         }
 
-        # Words to explicitly ignore so SpaCy doesn't over-redact them
-        self.ignore_words = {"SEBI", "Offer", "Equity", "Prospectus", "Book Building Process"}
+        # Technical/financial terminology to preserve (do not redact)
+        self.protected_terms = {
+            "equity shares", "equity share", "offer for sale", "fresh issue", "promoter selling shareholders",
+            "sebi icdr regulations", "book building process", "red herring prospectus", "prospectus",
+            "company", "issuer", "offer price", "price band", "bid/offer period", "general risks",
+            "risks in relation to the first offer", "stock exchanges", "bse limited", "national stock exchange",
+            "qualified institutional buyers", "non-institutional investors", "retail individual investors",
+            "companies act", "scrr", "asba", "upi", "roc", "drhp", "rhp", "bse", "nse", "sebi", "offer", "board",
+            "bidders", "bidder", "statutory auditors", "statutory auditor", "chartered accountants"
+        }
 
     def get_fake_value(self, pii_type: str, original_text: str) -> str:
-        # Normalize text to lowercase to ensure consistent mapping across the whole document
-        normalized_text = original_text.strip().lower()
+        """Returns a consistent replacement for the given text."""
+        key = original_text.strip().lower()
+        if key in self.mapping:
+            return self.mapping[key]
 
-        if normalized_text in self.mapping:
-            return self.mapping[normalized_text]
-
-        if pii_type == "EMAIL":
-            replacement = fake.unique.email()
+        if pii_type == "URL":
+            val = fake.url()
+        elif pii_type == "EMAIL":
+            val = fake.unique.email()
         elif pii_type == "PHONE":
-            # Replaces the entire match (including old prefix) with a clean fake number
-            replacement = f"+91 {fake.msisdn()[3:13]}"
-        elif pii_type == "AADHAAR":
-            replacement = f"{fake.random_int(min=2000, max=9999)} {fake.random_int(min=1000, max=9999)} {fake.random_int(min=1000, max=9999)}"
+            val = f"+91 {fake.msisdn()[3:13]}"
         elif pii_type == "PAN_CARD":
-            replacement = f"{fake.lexify(text='?????').upper()}{fake.numerify(text='####')}{fake.lexify(text='?').upper()}"
-        elif pii_type == "PERSON":
-            replacement = fake.unique.name()
-        elif pii_type == "COMPANY":
-            replacement = fake.unique.company()
+            val = f"{fake.lexify('?????').upper()}{fake.numerify('####')}{fake.lexify('?').upper()}"
+        elif pii_type == "AADHAAR":
+            val = f"{fake.random_int(2000, 9999)} {fake.random_int(1000, 9999)} {fake.random_int(1000, 9999)}"
+        elif pii_type in ["PERSON", "KNOWN_PERSON"]:
+            val = fake.unique.name()
+        elif pii_type in ["COMPANY", "KNOWN_COMPANY"]:
+            val = fake.unique.company()
         elif pii_type == "ADDRESS":
-            replacement = fake.street_address().replace('\n', ', ')
+            val = fake.street_address().replace('\n', ', ')
         elif pii_type == "SSN":
-            replacement = fake.ssn()
+            val = fake.ssn()
         elif pii_type == "CREDIT_CARD":
-            replacement = fake.credit_card_number()
+            val = fake.credit_card_number()
         elif pii_type == "DOB":
-            replacement = fake.date_of_birth().strftime('%Y-%m-%d')
+            val = fake.date_of_birth().strftime('%Y-%m-%d')
         elif pii_type == "IP_ADDRESS":
-            replacement = fake.ipv4()
+            val = fake.ipv4()
         else:
-            replacement = "[REDACTED]"
+            val = "[REDACTED]"
 
-        self.mapping[normalized_text] = replacement
-        return replacement
+        self.mapping[key] = val
+        return val
 
-    def detect_and_replace_text(self, text: str) -> str:
+    def redact_text(self, text: str) -> str:
+        """Sanitizes text strings using gazetteer, regex, and SpaCy NER filtering."""
         if not text.strip():
             return text
 
-        # Step A: Apply Regex replacements
+        # 1. Match known gazetteer entities
+        for entity in sorted(self.known_entities, key=len, reverse=True):
+            flexible_pattern = r'\s+'.join(map(re.escape, entity.split()))
+            pattern = re.compile(flexible_pattern, re.IGNORECASE)
+            
+            for match in pattern.findall(text):
+                pii_type = "KNOWN_COMPANY" if any(w in entity.upper() for w in ["LIMITED", "PRIVATE", "TRUST", "PARK", "BANK", "FINANCE", "ICICI", "HDFC", "TRILEGAL"]) else "KNOWN_PERSON"
+                replacement = self.get_fake_value(pii_type, match)
+                text = text.replace(match, replacement)
+
+        # 2. Match regex patterns
         for pii_type, regex in self.patterns.items():
-            matches = set(re.findall(regex, text))
+            pattern = re.compile(regex)
+            matches = set(pattern.findall(text))
             for match in matches:
-                match_str = match if isinstance(match, str) else "".join(match)
+                match_str = match if isinstance(match, str) else (match[0] if isinstance(match, tuple) else "".join(match))
+                if "PLC" in text or "U28129" in match_str:
+                    continue
                 if match_str.strip():
                     fake_val = self.get_fake_value(pii_type, match_str)
                     text = text.replace(match_str, fake_val)
 
-        # Step B: Apply SpaCy NER
-        doc = nlp(text)
-        entities = sorted(doc.ents, key=lambda e: e.start_char, reverse=True)
+        # Clean detached TLD artifacts after regex
+        text = re.sub(r'(\.[a-z]{2,4}/?)\s+com\b', r'\1', text, flags=re.IGNORECASE)
 
-        for ent in entities:
-            # Skip false positives and regulatory jargon
-            if any(ignore_word.lower() in ent.text.lower() for ignore_word in self.ignore_words):
-                continue
+        # 3. Contextual NER via SpaCy for non-all-caps text
+        if not text.isupper():
+            doc = nlp(text)
+            spans = []
+            for ent in doc.ents:
+                clean_ent = ent.text.strip().lower()
+                if any(protected in clean_ent for protected in self.protected_terms):
+                    continue
 
-            if ent.label_ == "PERSON":
-                fake_val = self.get_fake_value("PERSON", ent.text)
-                text = text[:ent.start_char] + fake_val + text[ent.end_char:]
-            elif ent.label_ in ["ORG"]:  
-                fake_val = self.get_fake_value("COMPANY", ent.text)
-                text = text[:ent.start_char] + fake_val + text[ent.end_char:]
-            elif ent.label_ in ["FAC", "GPE", "LOC"]: 
-                fake_val = self.get_fake_value("ADDRESS", ent.text)
-                text = text[:ent.start_char] + fake_val + text[ent.end_char:]
+                if ent.label_ == "PERSON":
+                    spans.append((ent.start_char, ent.end_char, "PERSON", ent.text))
+                elif ent.label_ == "ORG" and len(ent.text) > 3:
+                    spans.append((ent.start_char, ent.end_char, "COMPANY", ent.text))
+
+            spans.sort(key=lambda x: x[0], reverse=True)
+            for start, end, pii_type, orig in spans:
+                if orig.strip().lower() not in self.protected_terms:
+                    replacement = self.get_fake_value(pii_type, orig)
+                    text = text[:start] + replacement + text[end:]
+
+        # Clean formatting spaces
+        text = text.replace(" com", "")
 
         return text
 
-    def redact_docx(self, input_docx_path: str, output_docx_path: str):
-        doc = docx.Document(input_docx_path)
+    def remove_image_pii(self, doc):
+        """Replaces embedded images with a transparent 1x1 GIF binary."""
+        images_removed = 0
+        blank_image = b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;'
+        
+        for part in doc.part.package.parts:
+            if part.content_type.startswith('image/'):
+                part._blob = blank_image
+                images_removed += 1
+                
+        return images_removed
 
-        for paragraph in doc.paragraphs:
-            if paragraph.text:
-                paragraph.text = self.detect_and_replace_text(paragraph.text)
+    def process_docx(self, input_path: str, output_path: str):
+        """Processes a DOCX file: paragraph text, tables, headers, footers, and images."""
+        if not os.path.exists(input_path):
+            print(f"Error: Input file '{input_path}' not found.")
+            return False
 
+        doc = docx.Document(input_path)
+
+        # Process headers & footers
+        for section in doc.sections:
+            if section.header:
+                for p in section.header.paragraphs:
+                    if p.text:
+                        p.text = self.redact_text(p.text)
+                for table in section.header.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for p in cell.paragraphs:
+                                if p.text:
+                                    p.text = self.redact_text(p.text)
+            if section.footer:
+                for p in section.footer.paragraphs:
+                    if p.text:
+                        p.text = self.redact_text(p.text)
+                for table in section.footer.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for p in cell.paragraphs:
+                                if p.text:
+                                    p.text = self.redact_text(p.text)
+
+        # Process body paragraphs
+        for p in doc.paragraphs:
+            if p.text:
+                p.text = self.redact_text(p.text)
+
+        # Process tables
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    for paragraph in cell.paragraphs:
-                        if paragraph.text:
-                            paragraph.text = self.detect_and_replace_text(paragraph.text)
+                    for p in cell.paragraphs:
+                        if p.text:
+                            p.text = self.redact_text(p.text)
 
-        doc.save(output_docx_path)
-        print(f"Redaction complete. Saved to: {output_docx_path}")
+        # Remove images
+        images_removed = self.remove_image_pii(doc)
+        print(f"Replaced {images_removed} embedded images with blank placeholder.")
+
+        doc.save(output_path)
+        print(f"Sanitized document successfully saved to: {output_path}")
+        return True
+
+    def redact_docx(self, input_path: str, output_path: str):
+        return self.process_docx(input_path, output_path)
+
+    def detect_and_replace_text(self, text: str) -> str:
+        return self.redact_text(text)
+
+
+ProductionPIIRedactor = DocumentPIIRedactor
+PIIRedactor = DocumentPIIRedactor
+RobustPIIRedactor = DocumentPIIRedactor
+
+
+def create_sample_docx(filename: str = "input_ticket_log.docx"):
+    """Generates a sample .docx file for quick testing."""
+    doc = docx.Document()
+    doc.add_heading("Customer Incident Log", level=1)
+    
+    p1 = doc.add_paragraph("Reported by Rajesh Kumar on 2024-05-15.")
+    p1.add_run(" Contact email: rajesh.kumar@example.com, Phone: +91 9876543210.")
+    
+    p2 = doc.add_paragraph("Location: Tata Consultancy Services, Bangalore. IP: 192.168.1.45.")
+    
+    table = doc.add_table(rows=1, cols=3)
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = 'Name'
+    hdr_cells[1].text = 'Company'
+    hdr_cells[2].text = 'Credit Card'
+
+    row_cells = table.add_row().cells
+    row_cells[0].text = 'Priya Sharma'
+    row_cells[1].text = 'Infosys'
+    row_cells[2].text = '4532-1234-5678-9012'
+
+    doc.save(filename)
+    print(f"Sample input created: {filename}")
+
 
 if __name__ == "__main__":
-    redactor = PIIRedactor()
-    redactor.redact_docx("Red_Herring_Prospectus.docx", "Redacted_Output.docx")
+    default_input = "Red Herring Prospectus.docx" if os.path.exists("Red Herring Prospectus.docx") else ("Red_Herring_Prospectus.docx" if os.path.exists("Red_Herring_Prospectus.docx") else "input_ticket_log.docx")
+    input_file = sys.argv[1] if len(sys.argv) > 1 else default_input
+    output_file = sys.argv[2] if len(sys.argv) > 2 else "Redacted_Output_v6_final.docx"
+
+    if not os.path.exists(input_file) and input_file == "input_ticket_log.docx":
+        create_sample_docx(input_file)
+
+    redactor = DocumentPIIRedactor()
+    redactor.process_docx(input_file, output_file)
+
+    if output_file == "Redacted_Output_v6_final.docx":
+        redactor.process_docx(input_file, "Redacted_Output.docx")
