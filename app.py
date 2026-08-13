@@ -5,9 +5,7 @@ import docx
 from faker import Faker
 import spacy
 
-# ---------------------------------------------------------
-# Application Configuration & UI Setup
-# ---------------------------------------------------------
+# Application Configuration & UI Setup--
 st.set_page_config(page_title="PII Redaction Engine", page_icon="🛡️", layout="centered")
 
 st.title("🛡️ PII Redaction Tool for Word Documents")
@@ -15,7 +13,7 @@ st.markdown("""
 Upload a Microsoft Word (`.docx`) document to sanitize sensitive personal details, contact information, financial identifiers, and embedded images.
 """)
 
-# Cache SpaCy model loading across sessions
+# Cache SpaCy model--
 @st.cache_resource
 def load_nlp_model():
     return spacy.load("en_core_web_sm")
@@ -23,14 +21,12 @@ def load_nlp_model():
 nlp = load_nlp_model()
 fake = Faker("en_IN")
 
-# ---------------------------------------------------------
-# Document Redactor Engine
-# ---------------------------------------------------------
+# document retractor engine
 class DocumentPIIRedactor:
     def __init__(self):
         self.mapping = {}
 
-        # Gazetteer of domain entities (promoters, trusts, banks, registrars)
+        # Gazetteer of domain known_entities
         self.known_entities = {
             "KSH INTERNATIONAL LIMITED", "KSH International Limited", "KSH INTERNATIONAL PRIVATE LIMITED",
             "Bhandary Metal Extrusion Private Limited", "KUSHAL SUBBAYYA HEGDE", "Kushal Subbayya Hegde",
@@ -50,7 +46,7 @@ class DocumentPIIRedactor:
             "ICICI", "HDFC", "Trilegal"
         }
 
-        # Regular expressions for structured entities
+        # Regexs
         self.patterns = {
             "URL": r'(?i)(?:https?://|www\.)[a-z0-9.\-]+(?:\s*[\./]\s*[a-z0-9\-/]+)*',
             "EMAIL": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
@@ -59,7 +55,7 @@ class DocumentPIIRedactor:
             "AADHAAR": r'\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b',
         }
 
-        # Protected terms to avoid false positives
+        # Protected terms
         self.protected_terms = {
             "equity shares", "equity share", "offer for sale", "fresh issue", "promoter selling shareholders",
             "sebi icdr regulations", "book building process", "red herring prospectus", "prospectus",
@@ -99,7 +95,7 @@ class DocumentPIIRedactor:
         if not text.strip():
             return text
 
-        # Step 1: Flexible gazetteer matching
+        # gazetteer matching
         for entity in sorted(self.known_entities, key=len, reverse=True):
             flexible_pattern = r'\s+'.join(map(re.escape, entity.split()))
             pattern = re.compile(flexible_pattern, re.IGNORECASE)
@@ -109,7 +105,7 @@ class DocumentPIIRedactor:
                 replacement = self.get_fake_value(pii_type, match)
                 text = text.replace(match, replacement)
 
-        # Step 2: Strict regex rules
+        # regex rules
         for pii_type, regex in self.patterns.items():
             pattern = re.compile(regex)
             matches = set(pattern.findall(text))
@@ -121,7 +117,7 @@ class DocumentPIIRedactor:
                     fake_val = self.get_fake_value(pii_type, match_str)
                     text = text.replace(match_str, fake_val)
 
-        # Step 3: SpaCy Named Entity Recognition
+        # spacy named entity recognition
         if not text.isupper():
             doc = nlp(text)
             spans = []
@@ -140,7 +136,7 @@ class DocumentPIIRedactor:
                     replacement = self.get_fake_value(pii_type, orig)
                     text = text[:start] + replacement + text[end:]
 
-        # Step 4: Formatting cleanup
+        # cleanup
         text = text.replace(" com", "")
 
         return text
@@ -177,9 +173,7 @@ class DocumentPIIRedactor:
 
 ProductionPIIRedactor = DocumentPIIRedactor
 
-# ---------------------------------------------------------
-# Streamlit Interface Actions
-# ---------------------------------------------------------
+# Sttreamlit Interface Actions
 uploaded_file = st.file_uploader("Upload Word Document (.docx)", type="docx")
 
 if uploaded_file is not None:
@@ -189,13 +183,12 @@ if uploaded_file is not None:
         with st.spinner("Processing document text and replacing sensitive entities..."):
             redactor = DocumentPIIRedactor()
             
-            # Process in-memory stream
             file_stream = io.BytesIO(uploaded_file.getvalue())
             processed_stream, images_wiped = redactor.process_docx_stream(file_stream)
             
             st.success(f"✅ Document successfully sanitized ({images_wiped} images cleared).")
             
-            # Download button
+            # ddownload btn
             st.download_button(
                 label="📥 Download Redacted Document",
                 data=processed_stream,

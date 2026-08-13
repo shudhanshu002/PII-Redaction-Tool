@@ -5,7 +5,7 @@ import docx
 from faker import Faker
 import spacy
 
-# Load SpaCy English language model
+# loading SpaCy English language model here
 try:
     nlp = spacy.load("en_core_web_sm")
 except OSError:
@@ -19,10 +19,9 @@ fake = Faker("en_IN")
 
 class DocumentPIIRedactor:
     def __init__(self):
-        # Store original-to-fake value mappings for consistency throughout the document
         self.mapping = {}
 
-        # Gazetteer of known specific entities (promoters, trusts, banks, registrars)
+        # gazetteer of known specific thingss
         self.known_entities = {
             "KSH INTERNATIONAL LIMITED", "KSH International Limited", "KSH INTERNATIONAL PRIVATE LIMITED",
             "Bhandary Metal Extrusion Private Limited", "KUSHAL SUBBAYYA HEGDE", "Kushal Subbayya Hegde",
@@ -41,12 +40,12 @@ class DocumentPIIRedactor:
             "Bajaj Finance", "Federal Bank", "Export Import Bank of India", "Citibank"
         }
 
-        # Additional entity keywords
+        # Additional words
         self.known_entities.update({
             "ICICI", "HDFC", "Trilegal"
         })
 
-        # Regular expressions for structured identifiers
+        # Regexs
         self.patterns = {
             "URL": r'(?i)(?:https?://|www\.)[a-z0-9.\-]+(?:\s*[\./]\s*[a-z0-9\-/]+)*(?:\s*(?:com|in|co|org|net|gov|edu|io|info)\b)?',
             "EMAIL": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
@@ -59,7 +58,7 @@ class DocumentPIIRedactor:
             "DOB": r'\b(?:0[1-9]|1[0-2])[\/.-](?:0[1-9]|[12]\d|3[01])[\/.-](?:19|20)\d{2}\b|\b\d{4}[-/.](?:0[1-9]|1[02])[-/.](?:0[1-9]|[12]\d|[301])\b',
         }
 
-        # Technical/financial terminology to preserve (do not redact)
+        #Technical/financial terms to preserve
         self.protected_terms = {
             "equity shares", "equity share", "offer for sale", "fresh issue", "promoter selling shareholders",
             "sebi icdr regulations", "book building process", "red herring prospectus", "prospectus",
@@ -111,7 +110,7 @@ class DocumentPIIRedactor:
         if not text.strip():
             return text
 
-        # 1. Match known gazetteer entities
+        # Match known gazetteer entities--
         for entity in sorted(self.known_entities, key=len, reverse=True):
             flexible_pattern = r'\s+'.join(map(re.escape, entity.split()))
             pattern = re.compile(flexible_pattern, re.IGNORECASE)
@@ -121,7 +120,7 @@ class DocumentPIIRedactor:
                 replacement = self.get_fake_value(pii_type, match)
                 text = text.replace(match, replacement)
 
-        # 2. Match regex patterns
+        # match regex--
         for pii_type, regex in self.patterns.items():
             pattern = re.compile(regex)
             matches = set(pattern.findall(text))
@@ -133,10 +132,8 @@ class DocumentPIIRedactor:
                     fake_val = self.get_fake_value(pii_type, match_str)
                     text = text.replace(match_str, fake_val)
 
-        # Clean detached TLD artifacts after regex
         text = re.sub(r'(\.[a-z]{2,4}/?)\s+com\b', r'\1', text, flags=re.IGNORECASE)
 
-        # 3. Contextual NER via SpaCy for non-all-caps text
         if not text.isupper():
             doc = nlp(text)
             spans = []
@@ -156,7 +153,7 @@ class DocumentPIIRedactor:
                     replacement = self.get_fake_value(pii_type, orig)
                     text = text[:start] + replacement + text[end:]
 
-        # Clean formatting spaces
+        # formatting
         text = text.replace(" com", "")
 
         return text
@@ -204,12 +201,12 @@ class DocumentPIIRedactor:
                                 if p.text:
                                     p.text = self.redact_text(p.text)
 
-        # Process body paragraphs
+        # process body para
         for p in doc.paragraphs:
             if p.text:
                 p.text = self.redact_text(p.text)
 
-        # Process tables
+        # process tables
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -217,9 +214,14 @@ class DocumentPIIRedactor:
                         if p.text:
                             p.text = self.redact_text(p.text)
 
-        # Remove images
+        # remove images
         images_removed = self.remove_image_pii(doc)
         print(f"Replaced {images_removed} embedded images with blank placeholder.")
+
+        # ensure output dir
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
 
         doc.save(output_path)
         print(f"Sanitized document successfully saved to: {output_path}")
@@ -237,41 +239,16 @@ PIIRedactor = DocumentPIIRedactor
 RobustPIIRedactor = DocumentPIIRedactor
 
 
-def create_sample_docx(filename: str = "input_ticket_log.docx"):
-    """Generates a sample .docx file for quick testing."""
-    doc = docx.Document()
-    doc.add_heading("Customer Incident Log", level=1)
-    
-    p1 = doc.add_paragraph("Reported by Rajesh Kumar on 2024-05-15.")
-    p1.add_run(" Contact email: rajesh.kumar@example.com, Phone: +91 9876543210.")
-    
-    p2 = doc.add_paragraph("Location: Tata Consultancy Services, Bangalore. IP: 192.168.1.45.")
-    
-    table = doc.add_table(rows=1, cols=3)
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Name'
-    hdr_cells[1].text = 'Company'
-    hdr_cells[2].text = 'Credit Card'
-
-    row_cells = table.add_row().cells
-    row_cells[0].text = 'Priya Sharma'
-    row_cells[1].text = 'Infosys'
-    row_cells[2].text = '4532-1234-5678-9012'
-
-    doc.save(filename)
-    print(f"Sample input created: {filename}")
-
-
 if __name__ == "__main__":
-    default_input = "Red Herring Prospectus.docx" if os.path.exists("Red Herring Prospectus.docx") else ("Red_Herring_Prospectus.docx" if os.path.exists("Red_Herring_Prospectus.docx") else "input_ticket_log.docx")
-    input_file = sys.argv[1] if len(sys.argv) > 1 else default_input
-    output_file = sys.argv[2] if len(sys.argv) > 2 else "Redacted_Output_v6_final.docx"
+    default_input = os.path.join("input", "Red Herring Prospectus.docx")
+    if not os.path.exists(default_input) and os.path.exists("Red Herring Prospectus.docx"):
+        default_input = "Red Herring Prospectus.docx"
 
-    if not os.path.exists(input_file) and input_file == "input_ticket_log.docx":
-        create_sample_docx(input_file)
+    input_file = sys.argv[1] if len(sys.argv) > 1 else default_input
+    output_file = sys.argv[2] if len(sys.argv) > 2 else os.path.join("output", "redacted_output.docx")
+
+    print(f"Input Document : {input_file}")
+    print(f"Output Target  : {output_file}")
 
     redactor = DocumentPIIRedactor()
     redactor.process_docx(input_file, output_file)
-
-    if output_file == "Redacted_Output_v6_final.docx":
-        redactor.process_docx(input_file, "Redacted_Output.docx")
