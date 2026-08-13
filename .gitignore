@@ -24,8 +24,3 @@ __pycache__/
 .DS_Store
 Thumbs.db
 Desktop.ini
-
-# Output and binary documents (generated locally)
-*.docx
-*.pdf
-output/
