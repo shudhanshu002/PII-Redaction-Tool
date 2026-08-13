@@ -1,380 +1,118 @@
 import re
-from dataclasses import dataclass
-from pathlib import Path
-
 import docx
-import spacy
 from faker import Faker
+import spacy
 
-
-@dataclass
-class PIIMatch:
-    """Represents one piece of detected PII."""
-
-    pii_type: str
-    value: str
-    start: int
-    end: int
-
+nlp = spacy.load("en_core_web_sm")
+fake = Faker("en_IN")
 
 class PIIRedactor:
     def __init__(self):
-        self.fake = Faker("en_IN")
-        self.nlp = spacy.load("en_core_web_sm")
+        self.mapping = {}
 
-        # Keeps replacements stable throughout the document.
-        # Example:
-        # "Rashi Patil" -> "John Doe"
-        # Every later occurrence of Rashi Patil gets the same replacement.
-        self.replacements = {}
-
+        # 1. Stricter Regex Patterns including PAN and Aadhaar
         self.patterns = {
-            "EMAIL": re.compile(
-                r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
-            ),
-
-            "PHONE": re.compile(
-                r"(?<!\d)"
-                r"(?:\+91[\s-]?)?"
-                r"(?:[6-9]\d{4}[\s-]?\d{5})"
-                r"(?!\d)"
-            ),
-
-            "IP_ADDRESS": re.compile(
-                r"\b(?:"
-                r"(?:25[0-5]|2[0-4]\d|1?\d?\d)\."
-                r"){3}"
-                r"(?:25[0-5]|2[0-4]\d|1?\d?\d)"
-                r"\b"
-            ),
-
-            "SSN": re.compile(
-                r"\b\d{3}-\d{2}-\d{4}\b"
-            ),
-
-            "CREDIT_CARD": re.compile(
-                r"(?<!\d)"
-                r"(?:\d[ -]?){13,19}"
-                r"(?!\d)"
-            ),
-
-            "DOB": re.compile(
-                r"\b(?:"
-                r"(?:0?[1-9]|[12]\d|3[01])[-/.]"
-                r"(?:0?[1-9]|1[0-2])[-/.]"
-                r"(?:19|20)\d{2}"
-                r"|"
-                r"(?:19|20)\d{2}[-/.]"
-                r"(?:0?[1-9]|1[0-2])[-/.]"
-                r"(?:0?[1-9]|[12]\d|3[01])"
-                r")\b"
-            ),
+            "EMAIL": r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+            # Strict 10-digit Indian mobile format with optional +91 prefix. Avoids CIN matches.
+            "PHONE": r'(?<!\w)(?:\+?91[\s-]?)?[6-9]\d{9}(?!\w)', 
+            "AADHAAR": r'\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b',
+            "PAN_CARD": r'\b[A-Z]{5}[0-9]{4}[A-Z]\b',
+            "IP_ADDRESS": r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b',
+            "CREDIT_CARD": r'\b(?:\d[ -]*?){13,16}\b',
+            "SSN": r'\b\d{3}-\d{2}-\d{4}\b',
+            "DOB": r'\b(0[1-9]|1[0-2])[\/.-](0[1-9]|[12]\d|3[01])[\/.-](19|20)\d{2}\b|\b\d{4}[-/.](0[1-9]|1[02])[-/.](0[1-9]|[12]\d|3[01])\b',
         }
 
-    # ------------------------------------------------------------------
-    # Fake value generation
-    # ------------------------------------------------------------------
+        # Words to explicitly ignore so SpaCy doesn't over-redact them
+        self.ignore_words = {"SEBI", "Offer", "Equity", "Prospectus", "Book Building Process"}
 
-    def _generate_replacement(self, pii_type: str) -> str:
-        """Generate a fake value appropriate for the PII category."""
+    def get_fake_value(self, pii_type: str, original_text: str) -> str:
+        # Normalize text to lowercase to ensure consistent mapping across the whole document
+        normalized_text = original_text.strip().lower()
+
+        if normalized_text in self.mapping:
+            return self.mapping[normalized_text]
 
         if pii_type == "EMAIL":
-            return self.fake.unique.email()
+            replacement = fake.unique.email()
+        elif pii_type == "PHONE":
+            # Replaces the entire match (including old prefix) with a clean fake number
+            replacement = f"+91 {fake.msisdn()[3:13]}"
+        elif pii_type == "AADHAAR":
+            replacement = f"{fake.random_int(min=2000, max=9999)} {fake.random_int(min=1000, max=9999)} {fake.random_int(min=1000, max=9999)}"
+        elif pii_type == "PAN_CARD":
+            replacement = f"{fake.lexify(text='?????').upper()}{fake.numerify(text='####')}{fake.lexify(text='?').upper()}"
+        elif pii_type == "PERSON":
+            replacement = fake.unique.name()
+        elif pii_type == "COMPANY":
+            replacement = fake.unique.company()
+        elif pii_type == "ADDRESS":
+            replacement = fake.street_address().replace('\n', ', ')
+        elif pii_type == "SSN":
+            replacement = fake.ssn()
+        elif pii_type == "CREDIT_CARD":
+            replacement = fake.credit_card_number()
+        elif pii_type == "DOB":
+            replacement = fake.date_of_birth().strftime('%Y-%m-%d')
+        elif pii_type == "IP_ADDRESS":
+            replacement = fake.ipv4()
+        else:
+            replacement = "[REDACTED]"
 
-        if pii_type == "PHONE":
-            return f"+91 {self.fake.msisdn()[-10:]}"
+        self.mapping[normalized_text] = replacement
+        return replacement
 
-        if pii_type == "PERSON":
-            return self.fake.unique.name()
-
-        if pii_type == "COMPANY":
-            return self.fake.unique.company()
-
-        if pii_type == "ADDRESS":
-            address = self.fake.address()
-            return " ".join(address.split())
-
-        if pii_type == "SSN":
-            return self.fake.ssn()
-
-        if pii_type == "CREDIT_CARD":
-            return self.fake.credit_card_number()
-
-        if pii_type == "DOB":
-            return self.fake.date_of_birth().strftime("%d/%m/%Y")
-
-        if pii_type == "IP_ADDRESS":
-            return self.fake.ipv4_private()
-
-        return "[REDACTED]"
-
-    def replacement_for(self, pii_type: str, original: str) -> str:
-        """
-        Return a consistent fake value for a detected PII value.
-
-        The same original value will always receive the same replacement.
-        """
-
-        key = (pii_type, original)
-
-        if key not in self.replacements:
-            self.replacements[key] = self._generate_replacement(pii_type)
-
-        return self.replacements[key]
-
-    # ------------------------------------------------------------------
-    # Validation helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def valid_credit_card(number: str) -> bool:
-        """
-        Validate a credit-card candidate using the Luhn algorithm.
-        """
-
-        digits = re.sub(r"\D", "", number)
-
-        if not 13 <= len(digits) <= 19:
-            return False
-
-        total = 0
-        reverse_digits = digits[::-1]
-
-        for index, digit in enumerate(reverse_digits):
-            value = int(digit)
-
-            if index % 2 == 1:
-                value *= 2
-
-                if value > 9:
-                    value -= 9
-
-            total += value
-
-        return total % 10 == 0
-
-    # ------------------------------------------------------------------
-    # Regex-based detection
-    # ------------------------------------------------------------------
-
-    def detect_regex_pii(self, text: str) -> list[PIIMatch]:
-        """Find deterministic PII using regular expressions."""
-
-        matches = []
-
-        for pii_type, pattern in self.patterns.items():
-
-            for match in pattern.finditer(text):
-                value = match.group(0)
-
-                # Credit-card regex can match ordinary long numbers.
-                # Only keep candidates passing Luhn validation.
-                if pii_type == "CREDIT_CARD":
-                    if not self.valid_credit_card(value):
-                        continue
-
-                matches.append(
-                    PIIMatch(
-                        pii_type=pii_type,
-                        value=value,
-                        start=match.start(),
-                        end=match.end(),
-                    )
-                )
-
-        return matches
-
-    # ------------------------------------------------------------------
-    # NER-based detection
-    # ------------------------------------------------------------------
-
-    def detect_ner_pii(self, text: str) -> list[PIIMatch]:
-        """
-        Detect names and organizations using spaCy NER.
-
-        Locations are intentionally not automatically classified as
-        physical addresses because a city name alone is not an address.
-        """
-
-        document = self.nlp(text)
-        matches = []
-
-        for entity in document.ents:
-
-            if entity.label_ == "PERSON":
-                matches.append(
-                    PIIMatch(
-                        pii_type="PERSON",
-                        value=entity.text,
-                        start=entity.start_char,
-                        end=entity.end_char,
-                    )
-                )
-
-            elif entity.label_ == "ORG":
-                matches.append(
-                    PIIMatch(
-                        pii_type="COMPANY",
-                        value=entity.text,
-                        start=entity.start_char,
-                        end=entity.end_char,
-                    )
-                )
-
-        return matches
-
-    # ------------------------------------------------------------------
-    # Combined detection
-    # ------------------------------------------------------------------
-
-    def detect_pii(self, text: str) -> list[PIIMatch]:
-        """Run all available detectors and remove overlapping matches."""
-
-        detected = []
-
-        detected.extend(self.detect_regex_pii(text))
-        detected.extend(self.detect_ner_pii(text))
-
-        # Sort by location in the original text.
-        detected.sort(key=lambda item: (item.start, -(item.end - item.start)))
-
-        # Avoid overlapping detections.
-        final_matches = []
-
-        for current in detected:
-
-            overlaps_existing = False
-
-            for previous in final_matches:
-                if (
-                    current.start < previous.end
-                    and current.end > previous.start
-                ):
-                    overlaps_existing = True
-                    break
-
-            if not overlaps_existing:
-                final_matches.append(current)
-
-        return final_matches
-
-    # ------------------------------------------------------------------
-    # Text replacement
-    # ------------------------------------------------------------------
-
-    def redact_text(self, text: str) -> str:
-        """Detect PII in a text block and replace it from right to left."""
-
-        if not text or not text.strip():
+    def detect_and_replace_text(self, text: str) -> str:
+        if not text.strip():
             return text
 
-        matches = self.detect_pii(text)
+        # Step A: Apply Regex replacements
+        for pii_type, regex in self.patterns.items():
+            matches = set(re.findall(regex, text))
+            for match in matches:
+                match_str = match if isinstance(match, str) else "".join(match)
+                if match_str.strip():
+                    fake_val = self.get_fake_value(pii_type, match_str)
+                    text = text.replace(match_str, fake_val)
 
-        # Replace from the end of the string toward the beginning.
-        # This prevents earlier indexes from becoming invalid.
-        for match in reversed(matches):
+        # Step B: Apply SpaCy NER
+        doc = nlp(text)
+        entities = sorted(doc.ents, key=lambda e: e.start_char, reverse=True)
 
-            replacement = self.replacement_for(
-                match.pii_type,
-                match.value,
-            )
+        for ent in entities:
+            # Skip false positives and regulatory jargon
+            if any(ignore_word.lower() in ent.text.lower() for ignore_word in self.ignore_words):
+                continue
 
-            text = (
-                text[:match.start]
-                + replacement
-                + text[match.end:]
-            )
+            if ent.label_ == "PERSON":
+                fake_val = self.get_fake_value("PERSON", ent.text)
+                text = text[:ent.start_char] + fake_val + text[ent.end_char:]
+            elif ent.label_ in ["ORG"]:  
+                fake_val = self.get_fake_value("COMPANY", ent.text)
+                text = text[:ent.start_char] + fake_val + text[ent.end_char:]
+            elif ent.label_ in ["FAC", "GPE", "LOC"]: 
+                fake_val = self.get_fake_value("ADDRESS", ent.text)
+                text = text[:ent.start_char] + fake_val + text[ent.end_char:]
 
         return text
 
-    # ------------------------------------------------------------------
-    # DOCX processing
-    # ------------------------------------------------------------------
+    def redact_docx(self, input_docx_path: str, output_docx_path: str):
+        doc = docx.Document(input_docx_path)
 
-    def process_paragraph(self, paragraph):
-        """Redact text inside a paragraph."""
+        for paragraph in doc.paragraphs:
+            if paragraph.text:
+                paragraph.text = self.detect_and_replace_text(paragraph.text)
 
-        if paragraph.text.strip():
-            paragraph.text = self.redact_text(paragraph.text)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        if paragraph.text:
+                            paragraph.text = self.detect_and_replace_text(paragraph.text)
 
-    def process_table(self, table):
-        """Redact all text contained in a table."""
-
-        for row in table.rows:
-            for cell in row.cells:
-
-                for paragraph in cell.paragraphs:
-                    self.process_paragraph(paragraph)
-
-                for nested_table in cell.tables:
-                    self.process_table(nested_table)
-
-    def redact_document(self, input_path: str, output_path: str):
-        """
-        Read a DOCX file, redact PII from paragraphs and tables,
-        and save the resulting document.
-        """
-
-        input_file = Path(input_path)
-        output_file = Path(output_path)
-
-        if not input_file.exists():
-            raise FileNotFoundError(
-                f"Input document was not found: {input_file}"
-            )
-
-        document = docx.Document(input_file)
-
-        # Main document paragraphs
-        for paragraph in document.paragraphs:
-            self.process_paragraph(paragraph)
-
-        # Tables
-        for table in document.tables:
-            self.process_table(table)
-
-        # Headers and footers
-        for section in document.sections:
-
-            for paragraph in section.header.paragraphs:
-                self.process_paragraph(paragraph)
-
-            for table in section.header.tables:
-                self.process_table(table)
-
-            for paragraph in section.footer.paragraphs:
-                self.process_paragraph(paragraph)
-
-            for table in section.footer.tables:
-                self.process_table(table)
-
-        output_file.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        document.save(output_file)
-
-        print(f"Redacted document saved to: {output_file}")
-
-        print("\nReplacement summary:")
-        for (pii_type, original), replacement in self.replacements.items():
-            print(
-                f"{pii_type:15} "
-                f"{original!r} -> {replacement!r}"
-            )
-
-
-def main():
-    input_file = "input/input_ticket_log.docx"
-    output_file = "output/redacted_output.docx"
-
-    redactor = PIIRedactor()
-    redactor.redact_document(
-        input_file,
-        output_file,
-    )
-
+        doc.save(output_docx_path)
+        print(f"Redaction complete. Saved to: {output_docx_path}")
 
 if __name__ == "__main__":
-    main()
+    redactor = PIIRedactor()
+    redactor.redact_docx("Red_Herring_Prospectus.docx", "Redacted_Output.docx")
